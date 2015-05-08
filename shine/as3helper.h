@@ -3,6 +3,8 @@
 
 #include "AS3/AS3.h"
 
+//https://www.adobe.com/devnet-docs/flascc/docs/apidocs/com/adobe/flascc/CModule.html
+//https://www.adobe.com/devnet-docs/flascc/docs/capidocs/as3.html
 #define AS3_GetByteArray(varName, byteArrayPtr, byteArraySize) \
     do { \
         inline_as3 \
@@ -27,24 +29,6 @@
         ); \
     } while (0)
 
-#define AS3_DebugCharPtr(name, value) \
-    do { \
-        inline_as3 \
-        ( \
-            "MonsterDebugger.trace(this, CModule.readString(%0, %1) + ' : ' + CModule.readString(%2, %3));\n" \
-            : : "r"(name), "r"(strlen(name)), "r"(value), "r"(strlen(value)) \
-        ); \
-    } while(0)
-
-#define AS3_DebugInt(name, value) \
-    do { \
-        inline_as3 \
-        ( \
-            "MonsterDebugger.trace(this, CModule.readString(%0, %1) + ' : ' + %2);\n" \
-            : : "r"(name), "r"(strlen(name)), "r"(value) \
-        ); \
-    } while(0)
-
 #define AS3_Throw(msg) \
     do { \
         inline_as3 \
@@ -53,5 +37,6 @@
             : : "r"(msg), "r"(strlen(msg)) \
         ); \
     } while(0)
+
 
 #endif

@@ -1,128 +1,130 @@
-//    Shine is an MP3 encoder
-//    Copyright (C) 1999-2000  Gabriel Bouvigne
-//
-//    This library is free software; you can redistribute it and/or
-//    modify it under the terms of the GNU Library General Public
-//    License as published by the Free Software Foundation; either
-//    version 2 of the License, or (at your option) any later version.
-//
-//    This library is distributed in the hope that it will be useful,
-//    but WITHOUT ANY WARRANTY; without even the implied warranty of
-//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-//    Library General Public License for more details.
-
-
-#include <math.h>
+/* L3mdct */
 
 #include "types.h"
-#include "layer3.h"
 #include "l3mdct.h"
-
+#include "l3subband.h"
 
 /* This is table B.9: coefficients for aliasing reduction */
-static double c[8] = { -0.6,-0.535,-0.33,-0.185,-0.095,-0.041,-0.0142, -0.0037 };
-static double ca[8];
-static double cs[8];
+#define MDCT_CA(coef)	(int32_t)(coef / sqrt(1.0 + (coef * coef)) * 0x7fffffff)
+#define MDCT_CS(coef)	(int32_t)(1.0  / sqrt(1.0 + (coef * coef)) * 0x7fffffff)
 
-static double win[36];
-static double cos_l[18][36];
+#define MDCT_CA0	MDCT_CA(-0.6)
+#define MDCT_CA1	MDCT_CA(-0.535)
+#define MDCT_CA2	MDCT_CA(-0.33)
+#define MDCT_CA3	MDCT_CA(-0.185)
+#define MDCT_CA4	MDCT_CA(-0.095)
+#define MDCT_CA5	MDCT_CA(-0.041)
+#define MDCT_CA6	MDCT_CA(-0.0142)
+#define MDCT_CA7	MDCT_CA(-0.0037)
 
+#define MDCT_CS0	MDCT_CS(-0.6)
+#define MDCT_CS1	MDCT_CS(-0.535)
+#define MDCT_CS2	MDCT_CS(-0.33)
+#define MDCT_CS3	MDCT_CS(-0.185)
+#define MDCT_CS4	MDCT_CS(-0.095)
+#define MDCT_CS5	MDCT_CS(-0.041)
+#define MDCT_CS6	MDCT_CS(-0.0142)
+#define MDCT_CS7	MDCT_CS(-0.0037)
 
-void mdct_initialise()
+/*
+ * shine_mdct_initialise:
+ * -------------------
+ */
+void shine_mdct_initialise(shine_global_config *config)
 {
-    int i,m,k; //N;
-    double sq;
+  int m,k;
 
-/* prepare the aliasing reduction butterflies */
-    for (i=8; i--; )
+  /* prepare the mdct coefficients */
+  for(m=18; m--; )
+    for(k=36; k--; )
+      /* combine window and mdct coefficients into a single table */
+      /* scale and convert to fixed point before storing */
+      config->mdct.cos_l[m][k] = (int32_t)(sin(PI36*(k+0.5))
+                                      * cos((PI/72)*(2*k+19)*(2*m+1)) * 0x7fffffff);
+}
+
+/*
+ * shine_mdct_sub:
+ * ------------
+ */
+void shine_mdct_sub(shine_global_config *config, int stride)
+{
+  /* note. we wish to access the array 'config->mdct_freq[2][2][576]' as
+   * [2][2][32][18]. (32*18=576),
+   */
+  int32_t (*mdct_enc)[18];
+
+  int  ch,gr,band,j,k;
+  int32_t mdct_in[36];
+
+  for(ch=config->wave.channels; ch--; )
+  {
+    for(gr=0; gr<config->mpeg.granules_per_frame; gr++)
     {
-        sq = sqrt(1.0 + sq(c[i]));
-        ca[i] = c[i] / sq;
-        cs[i] = 1.0  / sq;
+      /* set up pointer to the part of config->mdct_freq we're using */
+      mdct_enc = (int32_t (*)[18]) config->mdct_freq[ch][gr];
+
+      /* polyphase filtering */
+      for(k=0; k<18; k+=2)
+      {
+      	shine_window_filter_subband(&config->buffer[ch], &config->l3_sb_sample[ch][gr+1][k  ][0], ch, config, stride);
+      	shine_window_filter_subband(&config->buffer[ch], &config->l3_sb_sample[ch][gr+1][k+1][0], ch, config, stride);
+        /* Compensate for inversion in the analysis filter
+         * (every odd index of band AND k)
+         */
+        for(band=1; band<32; band+=2)
+          config->l3_sb_sample[ch][gr+1][k+1][band] *= -1;
+      }
+
+      /* Perform imdct of 18 previous subband samples + 18 current subband samples */
+      for(band=0; band<32; band++)
+      {
+        for(k=18; k--; )
+        {
+          mdct_in[k   ] = config->l3_sb_sample[ch][gr  ][k][band];
+          mdct_in[k+18] = config->l3_sb_sample[ch][gr+1][k][band];
+        }
+
+        /* Calculation of the MDCT
+         * In the case of long blocks ( block_type 0,1,3 ) there are
+         * 36 coefficients in the time domain and 18 in the frequency
+         * domain.
+         */
+        for(k=18; k--; )
+        {
+          int32_t vm;
+          uint32_t vm_lo __attribute__((unused));
+
+          mul0(vm, vm_lo, mdct_in[35], config->mdct.cos_l[k][35]);
+          for(j=35; j; j-=7) {
+            muladd(vm, vm_lo, mdct_in[j-1], config->mdct.cos_l[k][j-1]);
+            muladd(vm, vm_lo, mdct_in[j-2], config->mdct.cos_l[k][j-2]);
+            muladd(vm, vm_lo, mdct_in[j-3], config->mdct.cos_l[k][j-3]);
+            muladd(vm, vm_lo, mdct_in[j-4], config->mdct.cos_l[k][j-4]);
+            muladd(vm, vm_lo, mdct_in[j-5], config->mdct.cos_l[k][j-5]);
+            muladd(vm, vm_lo, mdct_in[j-6], config->mdct.cos_l[k][j-6]);
+            muladd(vm, vm_lo, mdct_in[j-7], config->mdct.cos_l[k][j-7]);
+          }
+          mulz(vm, vm_lo);
+          mdct_enc[band][k] = vm;
+        }
+
+        /* Perform aliasing reduction butterfly */
+        if (band != 0)
+        {
+          cmuls(mdct_enc[band][0], mdct_enc[band-1][17-0], mdct_enc[band][0], mdct_enc[band-1][17-0], MDCT_CS0, MDCT_CA0);
+          cmuls(mdct_enc[band][1], mdct_enc[band-1][17-1], mdct_enc[band][1], mdct_enc[band-1][17-1], MDCT_CS1, MDCT_CA1);
+          cmuls(mdct_enc[band][2], mdct_enc[band-1][17-2], mdct_enc[band][2], mdct_enc[band-1][17-2], MDCT_CS2, MDCT_CA2);
+          cmuls(mdct_enc[band][3], mdct_enc[band-1][17-3], mdct_enc[band][3], mdct_enc[band-1][17-3], MDCT_CS3, MDCT_CA3);
+          cmuls(mdct_enc[band][4], mdct_enc[band-1][17-4], mdct_enc[band][4], mdct_enc[band-1][17-4], MDCT_CS4, MDCT_CA4);
+          cmuls(mdct_enc[band][5], mdct_enc[band-1][17-5], mdct_enc[band][5], mdct_enc[band-1][17-5], MDCT_CS5, MDCT_CA5);
+          cmuls(mdct_enc[band][6], mdct_enc[band-1][17-6], mdct_enc[band][6], mdct_enc[band-1][17-6], MDCT_CS6, MDCT_CA6);
+          cmuls(mdct_enc[band][7], mdct_enc[band-1][17-7], mdct_enc[band][7], mdct_enc[band-1][17-7], MDCT_CS7, MDCT_CA7);
+        }
+      }
     }
 
-    for(i=36; i--; )
-		win[i] = sin( PI36 * (i + 0.5) );
-
-
-    //N = 36;
-    for (m = 0; m < 18; m++ )
-      for (k = 0; k < 36; k++ )
-        cos_l[m][k] = cos( (PI / (72)) * (2 * k +19) *
-                     (2 * m + 1) ) / (9);
-
+    /* Save latest granule's subband samples to be used in the next mdct call */
+    memcpy(config->l3_sb_sample[ch][0], config->l3_sb_sample[ch][config->mpeg.granules_per_frame], sizeof(config->l3_sb_sample[0][0]));
+  }
 }
-
-
-static void mdct( double *in, double *out )
-/*-------------------------------------------------------------------*/
-/*   Function: Calculation of the MDCT                               */
-/*   In the case of long blocks ( block_type 0,1,3 ) there are       */
-/*   36 coefficents in the time domain and 18 in the frequency       */
-/*   domain.                                                         */
-/*-------------------------------------------------------------------*/
-{
-    int k,m;
-
-        for(m=18; m--; )
-        {
-            out[m]= win[35] * in[35] * cos_l[m][35];
-            for(k=35; k--; )
-                out[m] += win[k] * in[k] * cos_l[m][k];
-        }
-}
-
-
-void mdct_sub(double sb_sample[2][3][18][SBLIMIT], 
-                 double (*mdct_freq)[2][samp_per_frame2], 
-                 side_info_t *side_info)
-{
-
-    double (*mdct_enc)[2][32][18] = (double (*)[2][32][18]) mdct_freq;
-
-    int      ch,gr,band,k,j;
-    gr_info *cod_info;
-    double   mdct_in[36];
-    double   bu,bd;
-    
-    for(gr=0; gr<2; gr++)
-        for(ch=config.wave.channels; ch--; )
-        {
-	    cod_info = (gr_info*) &(side_info->gr[gr].ch[ch]) ;
-	    
-/* Compensate for inversion in the analysis filter */
-	    for(band=32; band--; )
-		for(k=18; k--; )
-		    if((band&1) && (k&1))
-				sb_sample[ch][gr+1][k][band] *= -1.0;
-	    
-/* Perform imdct of 18 previous subband samples + 18 current subband samples */
-	   for(band=32; band--; )
-	    {
-		for(k=18; k--; )
-		{
-		    mdct_in[k]    = sb_sample[ch][ gr ][k][band];
-		    mdct_in[k+18] = sb_sample[ch][gr+1][k][band];
-		}
-		
-		mdct(mdct_in,&mdct_enc[gr][ch][band][0]);
-	    }
-	    
-/* Perform aliasing reduction butterfly*/
-		for(band=31; band--; )
-		    for(k=8; k--; )
-		    {
-			bu = mdct_enc[gr][ch][band][17-k] * cs[k] + mdct_enc[gr][ch][band+1][k] * ca[k];
-			bd = mdct_enc[gr][ch][band+1][k] * cs[k] - mdct_enc[gr][ch][band][17-k] * ca[k];
-			mdct_enc[gr][ch][band][17-k] = bu;
-			mdct_enc[gr][ch][band+1][k]  = bd;
-		    }
-	}
-    
-/* Save latest granule's subband samples to be used in the next mdct call */
-    for(ch=config.wave.channels ;ch--; )
-	for(j=18; j--; )
-	    for(band=32; band--; )
-			sb_sample[ch][0][j][band] = sb_sample[ch][2][j][band];
-}
-
